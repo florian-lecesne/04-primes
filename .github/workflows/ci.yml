@@ -1,0 +1,149 @@
+
+# This workflow will install Python dependencies, run tests and lint with a single version of Python
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
+
+name: Python grader
+
+on: [push]
+
+permissions:
+  contents: write
+
+jobs:
+
+  testing:
+  
+    if: github.actor != 'github-classroom[bot]'
+    runs-on: ubuntu-latest
+    
+    outputs:
+      pylint_score: ${{ steps.pylint.outputs.pylint_score }}
+
+    steps:
+
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Cache Python packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pylint pytest
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+    
+    - name: Lint with pylint
+      id: pylint
+      run: |
+        score=$(python -m pylint *.py | grep rated | awk '{print $7}' | cut -d'/' -f1)
+        if [ -z "$score" ]; then
+          echo "Failed to extract Pylint score."
+          exit 1
+        fi
+        pylint_score=$(echo "scale=2; $score / 10" | bc)
+        echo "pylint_score=$pylint_score" >> $GITHUB_OUTPUT
+
+    - name: Test with pytest
+      continue-on-error: true
+      run: |
+        pytest ./.python/test_.py --junitxml=./.python/results.xml
+        if [ -f ./.python/results.xml ]; then echo "results.xml created"; fi
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: my-results-artifact
+        path: ./.python/results.xml
+
+
+  grading:
+
+    if: github.actor != 'github-classroom[bot]'
+    runs-on: ubuntu-latest
+
+    outputs:
+      grade: ${{ steps.python-grade.outputs.grade }}
+      string: ${{ steps.python-grade.outputs.string }}
+    
+    needs: testing
+
+    steps:
+
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Download artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: my-results-artifact
+        path: ./.python/dir
+
+    - name: Restore file
+      run:
+        mv ./.python/dir/results.xml ./.python/results.xml
+     
+    - name: Grade
+      id: python-grade
+      run: |
+        output=$(python ./.python/grade.py ./.python/results.xml)
+        echo $output
+        grade=$(echo "$output" | cut -d',' -f1)
+        echo "grade=$grade" >> $GITHUB_OUTPUT
+        string=$(echo "$output" | cut -d',' -f2)
+        echo "string=$string" >> $GITHUB_OUTPUT
+
+
+  Airtable:
+
+    if: github.actor != 'github-classroom[bot]'
+    runs-on: ubuntu-latest
+
+    needs: 
+      - grading
+      - testing
+
+    steps:
+
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Cache Python packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyairtable
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+    - name: Update Airtable
+      id: update-airtable
+      env:
+        AIRTABLE_PAT: ${{ secrets.AIRTABLE_PAT }}
+        AIRTABLE_DB_ID: ${{ secrets.AIRTABLE_DB_ID }}
+        AIRTABLE_TABLE_ID : ${{ secrets.AIRTABLE_TABLE_ID }}
+      run: |
+        python ./.python/updatedb.py ${{ needs.grading.outputs.grade }} ${{ needs.grading.outputs.string }} ${{ needs.testing.outputs.pylint_score }}
